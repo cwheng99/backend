@@ -1,0 +1,119 @@
+"""Backend regression tests for batch pickup + core endpoints (beep fix iteration)."""
+import os
+import pytest
+import requests
+
+BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL") or "https://delivery-log-28.preview.emergentagent.com"
+API = BASE_URL.rstrip("/") + "/api"
+
+
+@pytest.fixture(scope="module")
+def s():
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json"})
+    yield session
+    session.close()
+
+
+# Health
+def test_root(s):
+    r = s.get(f"{API}/")
+    assert r.status_code == 200
+    assert "message" in r.json()
+
+
+# Stats
+def test_stats(s):
+    r = s.get(f"{API}/packages/stats")
+    assert r.status_code == 200
+    d = r.json()
+    for k in ("today", "week", "month", "today_charges", "today_pending", "today_picked_up", "today_returned"):
+        assert k in d
+
+
+# Batch endpoint - with id (create then batch-update)
+def test_batch_status_by_id(s):
+    # Create a fresh package
+    c = s.post(f"{API}/packages", json={"recipient_name": "TEST_batch_id", "tracking_number": "TEST_TN_ID_1"})
+    assert c.status_code == 200
+    pkg_id = c.json()["id"]
+
+    r = s.post(f"{API}/packages/batch-status", json={
+        "items": [{"id": pkg_id}],
+        "status": "picked_up",
+    })
+    assert r.status_code == 200
+    arr = r.json()
+    assert len(arr) == 1
+    assert arr[0]["id"] == pkg_id
+    assert arr[0]["status"] == "picked_up"
+
+    # cleanup
+    s.delete(f"{API}/packages/{pkg_id}")
+
+
+# Batch endpoint - with tracking_number that already exists
+def test_batch_status_by_tracking_existing(s):
+    tn = "TEST_TN_BATCH_EXIST_1"
+    c = s.post(f"{API}/packages", json={"tracking_number": tn})
+    assert c.status_code == 200
+    pkg_id = c.json()["id"]
+
+    r = s.post(f"{API}/packages/batch-status", json={
+        "items": [{"tracking_number": tn}],
+        "status": "picked_up",
+    })
+    assert r.status_code == 200
+    arr = r.json()
+    assert len(arr) == 1
+    assert arr[0]["status"] == "picked_up"
+    assert arr[0]["tracking_number"] == tn
+
+    s.delete(f"{API}/packages/{pkg_id}")
+
+
+# Batch endpoint - unknown tracking_number → should auto-create
+def test_batch_status_by_tracking_new(s):
+    tn = "TEST_TN_BATCH_NEW_XYZ"
+    r = s.post(f"{API}/packages/batch-status", json={
+        "items": [{"tracking_number": tn}],
+        "status": "picked_up",
+    })
+    assert r.status_code == 200
+    arr = r.json()
+    assert len(arr) == 1
+    assert arr[0]["tracking_number"] == tn
+    assert arr[0]["status"] == "picked_up"
+
+    s.delete(f"{API}/packages/{arr[0]['id']}")
+
+
+# Batch endpoint - invalid status
+def test_batch_status_invalid_status(s):
+    r = s.post(f"{API}/packages/batch-status", json={
+        "items": [{"tracking_number": "TEST_TN_INVALID"}],
+        "status": "not_a_status",
+    })
+    assert r.status_code == 400
+
+
+# Batch endpoint - empty items
+def test_batch_status_empty_items(s):
+    r = s.post(f"{API}/packages/batch-status", json={"items": [], "status": "picked_up"})
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+# Packages search (used by pickup-batch screen)
+def test_packages_search(s):
+    tn = "TEST_TN_SEARCH_ABC"
+    c = s.post(f"{API}/packages", json={"tracking_number": tn, "recipient_name": "TEST_search"})
+    assert c.status_code == 200
+    pkg_id = c.json()["id"]
+
+    r = s.get(f"{API}/packages", params={"search": tn, "limit": 5})
+    assert r.status_code == 200
+    hits = r.json()
+    assert any(p["tracking_number"] == tn for p in hits)
+
+    s.delete(f"{API}/packages/{pkg_id}")
